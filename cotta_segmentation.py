@@ -1,6 +1,15 @@
 """
 CoTTA for Semantic Segmentation - Adapted for CARLA
 Based on the CoTTA paper: https://arxiv.org/abs/2203.13591
+
+Implementation Notes:
+- Uses ORIGINAL CoTTA configuration (train mode, track_running_stats=False)
+  for most BatchNorm layers to match the paper: Wang et al., CVPR 2022
+- Exception: Bottleneck BN layers (1x1 spatial) use eval mode to avoid
+  PyTorch's "Expected more than 1 value per channel" error with batch_size=1
+- This hybrid approach preserves CoTTA's core mechanism while enabling
+  single-frame online adaptation
+- Unlike Tent, CoTTA updates ALL model parameters, not just BatchNorm
 """
 
 from copy import deepcopy
@@ -53,7 +62,7 @@ class CoTTASegmentation(nn.Module):
     Adapts a segmentation model during test-time using entropy minimization.
     """
     def __init__(self, model, optimizer, steps=1, episodic=False,
-                 mt_alpha=0.999, rst_m=0.01, ap=0.92, num_classes=13):
+                 mt_alpha=0.999, rst_m=0.01, ap=0.1, num_classes=29):
         super().__init__()
         self.model = model
         self.optimizer = optimizer
@@ -177,7 +186,7 @@ class CoTTASegmentation(nn.Module):
                     with torch.no_grad():
                         # Move model_state tensor to same device as parameter
                         original_param = self.model_state[f"{nm}.{npp}"].to(p.device)
-                        p.data = original_param * mask + p * (1. - mask)
+                        p.data = original_param * mask + p.data * (1. - mask)
 
         # Return in the same format as the model output for compatibility
         # This ensures postprocess_output can handle SegFormer's lower-resolution output correctly
@@ -256,21 +265,64 @@ def load_model_and_optimizer(model, optimizer, model_state, optimizer_state):
     optimizer.load_state_dict(optimizer_state)
 
 
+def identify_bottleneck_bn(model):
+    """
+    Identify BatchNorm layers that follow global pooling (spatial size = 1x1).
+    These layers will cause "Expected more than 1 value" error in train mode with batch_size=1.
+
+    For DeepLabV3, this includes ASPP project layers after global average pooling.
+    For other architectures, add patterns as needed.
+    """
+    bottleneck_names = set()
+
+    for name, module in model.named_modules():
+        # DeepLabV3 ASPP: the project layer after global pooling
+        if 'aspp' in name.lower() and 'project' in name.lower():
+            if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                bottleneck_names.add(name)
+
+        # SegFormer: can add specific patterns if needed
+        # Fast-SCNN: typically doesn't have 1x1 bottlenecks
+
+    return bottleneck_names
+
+
 def configure_model(model):
     """
-    Configure model for use with CoTTA.
+    Configure model for use with CoTTA (hybrid approach).
     Unlike Tent, CoTTA updates all parameters, not just BatchNorm.
+
+    Uses ORIGINAL CoTTA BatchNorm configuration where possible:
+    - BatchNorm in train mode with track_running_stats=False
+    - Computes statistics from test batch (online adaptation)
+
+    Exception: For bottleneck layers (1x1 spatial size), uses eval mode
+    to avoid PyTorch's "Expected more than 1 value" error with batch_size=1.
     """
     model.train()
     model.requires_grad_(True)
 
-    # For BatchNorm layers, keep in eval mode to avoid batch size=1 issues
-    # This is a common practice in test-time adaptation
-    for m in model.modules():
+    # Identify bottleneck BN layers that need special handling
+    bottleneck_names = identify_bottleneck_bn(model)
+
+    print("\nConfiguring CoTTA BatchNorm layers:")
+    print(f"  Found {len(bottleneck_names)} bottleneck BN layers")
+
+    # Configure each BatchNorm layer
+    for nm, m in model.named_modules():
         if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
-            # Keep BatchNorm in eval mode
-            m.eval()
-            # Use running stats (updated via gradient descent on parameters)
-            m.track_running_stats = True
+            if nm in bottleneck_names:
+                # Bottleneck: use eval mode (spatial size 1x1 workaround)
+                m.eval()
+                m.track_running_stats = True
+                print(f"  ⚠️  BN in eval mode (bottleneck): {nm}")
+            else:
+                # ORIGINAL CoTTA configuration: use train mode
+                # This allows the model to adapt to test distribution
+                m.train()
+                m.track_running_stats = False
+                m.running_mean = None
+                m.running_var = None
+                print(f"  ✓ BN in train mode (original CoTTA): {nm}")
 
     return model

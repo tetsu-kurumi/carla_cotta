@@ -1,6 +1,14 @@
 """
 Tent for Semantic Segmentation
 Simpler baseline compared to CoTTA - only updates BatchNorm parameters.
+
+Implementation Notes:
+- Uses ORIGINAL Tent configuration (train mode, track_running_stats=False)
+  for most BatchNorm layers to match the paper: Wang et al., ICLR 2021
+- Exception: Bottleneck BN layers (1x1 spatial) use eval mode to avoid
+  PyTorch's "Expected more than 1 value per channel" error with batch_size=1
+- This hybrid approach preserves Tent's core mechanism while enabling
+  single-frame online adaptation
 """
 
 from copy import deepcopy
@@ -111,28 +119,70 @@ def load_model_and_optimizer(model, optimizer, model_state, optimizer_state):
     optimizer.load_state_dict(optimizer_state)
 
 
+def identify_bottleneck_bn(model):
+    """
+    Identify BatchNorm layers that follow global pooling (spatial size = 1x1).
+    These layers will cause "Expected more than 1 value" error in train mode with batch_size=1.
+
+    For DeepLabV3, this includes ASPP project layers after global average pooling.
+    For other architectures, add patterns as needed.
+    """
+    bottleneck_names = set()
+
+    for name, module in model.named_modules():
+        # DeepLabV3 ASPP: the project layer after global pooling
+        if 'aspp' in name.lower() and 'project' in name.lower():
+            if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                bottleneck_names.add(name)
+
+        # SegFormer: can add specific patterns if needed
+        # Fast-SCNN: typically doesn't have 1x1 bottlenecks
+
+    return bottleneck_names
+
+
 def configure_model(model):
     """
-    Configure model for use with Tent.
-    Only BatchNorm layers are set to trainable.
+    Configure model for use with Tent (hybrid approach).
+
+    Uses ORIGINAL Tent configuration where possible:
+    - BatchNorm in train mode with track_running_stats=False
+    - Computes statistics from test batch (online adaptation)
+
+    Exception: For bottleneck layers (1x1 spatial size), uses eval mode
+    to avoid PyTorch's "Expected more than 1 value" error with batch_size=1.
     """
-    # Train mode for most layers
+    # Train mode for the model
     model.train()
 
     # Disable grad for all parameters
     model.requires_grad_(False)
 
-    # Enable grad only for BatchNorm parameters
-    # But keep BatchNorm in eval mode to avoid batch size issues
-    for m in model.modules():
+    # Identify bottleneck BN layers that need special handling
+    bottleneck_names = identify_bottleneck_bn(model)
+
+    print("\nConfiguring Tent BatchNorm layers:")
+    print(f"  Found {len(bottleneck_names)} bottleneck BN layers")
+
+    # Configure each BatchNorm layer
+    for nm, m in model.named_modules():
         if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
-            # Enable gradient computation for parameters
+            # Enable gradient computation for parameters (γ and β)
             m.requires_grad_(True)
-            # But keep in eval mode to avoid "Expected more than 1 value" error
-            # This is common practice in test-time adaptation
-            m.eval()
-            # Use running stats (which get updated via gradient descent)
-            m.track_running_stats = True
+
+            if nm in bottleneck_names:
+                # Bottleneck: use eval mode (spatial size 1x1 workaround)
+                m.eval()
+                m.track_running_stats = True
+                print(f"  ⚠️  BN in eval mode (bottleneck): {nm}")
+            else:
+                # ORIGINAL Tent configuration: use train mode
+                # This allows the model to adapt to test distribution
+                m.train()
+                m.track_running_stats = False
+                m.running_mean = None
+                m.running_var = None
+                print(f"  ✓ BN in train mode (original Tent): {nm}")
 
     return model
 

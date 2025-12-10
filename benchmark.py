@@ -22,7 +22,7 @@ class AdaptationBenchmark:
     - Hypothesis 3: Catastrophic forgetting (CoTTA ≥90% source performance)
     """
 
-    def __init__(self, num_classes: int = 13, save_dir: str = './results'):
+    def __init__(self, num_classes: int = 29, save_dir: str = './results'):
         self.num_classes = num_classes
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
@@ -352,18 +352,26 @@ class MethodMetrics:
         pred_flat = pred_mask.flatten()
         gt_flat = gt_classes.flatten()
 
-        # Update confusion matrix
+        # Update confusion matrices
         from sklearn.metrics import confusion_matrix
         cm = confusion_matrix(gt_flat, pred_flat, labels=range(self.num_classes))
 
+        # Update overall cumulative confusion matrix
         self.confusion_matrix += cm
+
+        # Update per-domain confusion matrix
         self.per_domain_confusion[domain] += cm
 
-        # Compute current mIoU
-        iou = np.diag(cm) / (cm.sum(axis=1) + cm.sum(axis=0) - np.diag(cm) + 1e-6)
-        miou = np.nanmean(iou)
+        # Compute CURRENT per-domain mIoU (from accumulated domain confusion matrix)
+        # This gives stable per-domain metrics instead of noisy per-frame metrics
+        domain_cm = self.per_domain_confusion[domain]
+        domain_iou = np.diag(domain_cm) / (
+            domain_cm.sum(axis=1) + domain_cm.sum(axis=0) - np.diag(domain_cm) + 1e-6
+        )
+        domain_miou = np.nanmean(domain_iou)
 
-        self.frame_history.append((frame_id, domain, miou))
+        # Store per-domain mIoU (not overall cumulative)
+        self.frame_history.append((frame_id, domain, domain_miou))
         self.total_frames += 1
 
     def compute_overall_miou(self) -> float:

@@ -25,7 +25,7 @@ from cotta_segmentation import CoTTASegmentation, configure_model as configure_c
 from tent_segmentation import TentSegmentation, configure_model as configure_tent, collect_params as collect_bn_params
 
 
-def get_base_model(num_classes=13, checkpoint_path=None, model_type='deeplabv3'):
+def get_base_model(num_classes=29, checkpoint_path=None, model_type='deeplabv3'):
     """
     Load base segmentation model.
 
@@ -103,9 +103,15 @@ def get_base_model(num_classes=13, checkpoint_path=None, model_type='deeplabv3')
     return model
 
 
-def setup_methods(base_model, device='cuda', learning_rate=1e-3):
+def setup_methods(base_model, device='cuda', learning_rate=1e-3, num_classes=29):
     """
     Setup all three methods: Static, TTDA, CoTTA
+
+    Args:
+        base_model: Pre-trained base model
+        device: 'cuda' or 'cpu'
+        learning_rate: Learning rate for adaptation
+        num_classes: Number of segmentation classes
 
     Returns:
         Dictionary of {method_name: (model, preprocessing_fn)}
@@ -138,15 +144,16 @@ def setup_methods(base_model, device='cuda', learning_rate=1e-3):
     cotta_params, _ = collect_params(cotta_model)
     cotta_optimizer = torch.optim.Adam(cotta_params, lr=learning_rate)
 
+    # CoTTA with hyperparameters matching the original paper
     cotta_wrapper = CoTTASegmentation(
         model=cotta_model,
         optimizer=cotta_optimizer,
         steps=1,
         episodic=False,
-        mt_alpha=0.999,
-        rst_m=0.01,
-        ap=0.92,
-        num_classes=13
+        mt_alpha=0.999,      # EMA momentum (same as original)
+        rst_m=0.001,         # Stochastic restoration rate (original: 0.001, was 0.01)
+        ap=0.1,              # Anchor probability threshold (original: 0.1, was 0.92)
+        num_classes=num_classes  # Use parameter instead of hardcoded value
     ).to(device)
 
     methods['CoTTA'] = (cotta_wrapper, lambda x: x)
@@ -217,7 +224,7 @@ def run_evaluation(
     checkpoint_path: str = None,
     device: str = 'cuda',
     model_type: str = 'deeplabv3',
-    num_classes: int = 28,
+    num_classes: int = 29,
     visualize: bool = True,
     results_dir: str = './results'
 ):
@@ -257,7 +264,7 @@ def run_evaluation(
     # Setup models
     print("Loading models...")
     base_model = get_base_model(num_classes=num_classes, checkpoint_path=checkpoint_path, model_type=model_type)
-    methods = setup_methods(base_model, device=device)
+    methods = setup_methods(base_model, device=device, num_classes=num_classes)
 
     # Setup benchmark
     benchmark = AdaptationBenchmark(num_classes=num_classes, save_dir=str(scenario_dir))
@@ -312,12 +319,14 @@ def run_evaluation(
                 else:
                     weather_info = f"{start_preset} → {end_preset} ({alpha:.1%})"
 
-                print(f"[{idx+1}/{len(transitions)}] Weather: {weather_info:35s} | ", end="")
+                print(f"[{idx+1}/{len(transitions)}] Domain: {weather_info:35s} | ", end="")
 
+                # Show per-domain mIoU (current domain performance, not cumulative)
                 for method_name in methods.keys():
                     metrics = benchmark.methods[method_name]
-                    current_miou = metrics.compute_overall_miou()
-                    print(f"{method_name}: {current_miou:.4f} | ", end="")
+                    per_domain = metrics.compute_per_domain_miou()
+                    current_domain_miou = per_domain.get(current_domain, 0.0)
+                    print(f"{method_name}: {current_domain_miou:.4f} | ", end="")
 
                 print()
 
@@ -347,7 +356,7 @@ def run_evaluation(
     return benchmark
 
 
-def run_all_scenarios(checkpoint_path=None, device='cuda', model_type='deeplabv3', num_classes=28):
+def run_all_scenarios(checkpoint_path=None, device='cuda', model_type='deeplabv3', num_classes=29):
     """
     Run all evaluation scenarios from the proposal.
     """
@@ -439,8 +448,8 @@ if __name__ == '__main__':
     parser.add_argument('--model-type', type=str, default='deeplabv3',
                        choices=['deeplabv3', 'fast_scnn', 'segformer_b3'],
                        help='Model architecture to use')
-    parser.add_argument('--num-classes', type=int, default=28,
-                       help='Number of segmentation classes (default: 28 for CARLA)')
+    parser.add_argument('--num-classes', type=int, default=29,
+                       help='Number of segmentation classes (default: 29 for CARLA)')
     parser.add_argument('--frames', type=int, default=500,
                        help='Frames per weather transition')
     parser.add_argument('--no-viz', action='store_true',
