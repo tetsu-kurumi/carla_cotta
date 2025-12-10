@@ -54,7 +54,7 @@ We provide pre-collected datasets and trained model checkpoints:
 - **Evaluation data**: ~18,500 frames across 5 evaluation scenarios (HDF5 format, ~15GB)
 - **Model checkpoint**: SegFormer-B3 trained on CARLA (.pth file, ~200MB)
 
-**Download link**: [TBD - Link to model checkpoints and collected data will be added here]
+**Download link**: [Link to Download](https://www.dropbox.com/scl/fo/zbk6umjpom6ko3beniat1/AGpWTy65ACD_qYISzAAX-Z0?rlkey=dm3poktd0gwhu62qanrhjcmap&st=rm739e65&dl=0)
 
 After downloading:
 1. Extract data to `./data/` directory
